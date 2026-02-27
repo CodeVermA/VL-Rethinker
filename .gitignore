@@ -175,7 +175,6 @@ cython_debug/
 
 
 # Ps
-Qwen2.5-VL-3B-Instruct/
+models/
 logs/
-data/subset_data_500
-data/subset_data_1000
+data/
