@@ -172,3 +172,10 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+
+# Ps
+Qwen2.5-VL-3B-Instruct/
+logs/
+data/subset_data_500
+data/subset_data_1000

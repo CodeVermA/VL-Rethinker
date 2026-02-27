@@ -1,5 +1,6 @@
 set -x
 
+nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv,noheader
 
 find_interface() {
   local ip_output=$(ip addr show | head -n 10) # Limit to first 10 lines
@@ -97,27 +98,34 @@ find_interface() {
   fi
 }
 
-MULTINODE_FLAG=True
-if [ -v MULTINODE_FLAG ]; then 
-    # Define a string
+# MULTINODE_FLAG=False
+# if [ -v MULTINODE_FLAG ]; then 
+#     # Define a string
     
-    # Set the IFS (Internal Field Separator) to space
-    IFS=','
+#     # Set the IFS (Internal Field Separator) to space
+#     IFS=','
 
-    WORLD_SIZE=${MA_NUM_HOSTS:-"1"}
-    export RAY_MASTER_NODE_ADDRESS=${myvar[(($WORLD_SIZE-1))]}
-    export RAY_MASTER_NODE_PORT=$(shuf -n 1 -i 30000-40000)
+#     WORLD_SIZE=${MA_NUM_HOSTS:-"1"}
+#     export RAY_MASTER_NODE_ADDRESS=${myvar[(($WORLD_SIZE-1))]}
+#     export RAY_MASTER_NODE_PORT=$(shuf -n 1 -i 30000-40000)
 
-    NODE_RANK=""
-    GPUS_PER_NODE=""
+#     NODE_RANK=""
+#     GPUS_PER_NODE=""
 
-else 
-    RAY_MASTER_NODE_ADDRESS="0.0.0.0"
-    RAY_MASTER_NODE_PORT=$(shuf -n 1 -i 30000-65535)
-    WORLD_SIZE=1
-    NODE_RANK=0
-    GPUS_PER_NODE=8
-fi
+# else 
+#     RAY_MASTER_NODE_ADDRESS="127.0.0.1"
+#     RAY_MASTER_NODE_PORT=$(shuf -n 1 -i 30000-65535)
+#     WORLD_SIZE=1
+#     NODE_RANK=0
+#     GPUS_PER_NODE=4
+# fi
+
+export RAY_MASTER_NODE_ADDRESS="127.0.0.1"
+export RAY_MASTER_NODE_PORT=$(shuf -n 1 -i 30000-65535)
+WORLD_SIZE=1
+NODE_RANK=0
+GPUS_PER_NODE=1
+
 MASTER_HOST="$VC_WORKER_HOSTS"
 MASTER_ADDR="${VC_WORKER_HOSTS%%,*}"
 # export NCCL_SOCKET_IFNAME=ens2f5
@@ -131,13 +139,14 @@ export CUDA_LAUNCH_BLOCKING=1
 export HOST_IP=0.0.0.0
 export VLLM_HOST_IP=0.0.0.0
 
-working_dir=/path/to/workdir
+working_dir="/home/s2412780/MLP-CW3/VL-Rethinker"
 cd $working_dir
 export HF_ENDPOINT=https://hf-mirror.com
-export WANDB_API_KEY=""
+export WANDB_API_KEY="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"
 nnode=$WORLD_SIZE
-tagname=${tagname:-""}
+tagname="qwen3-4b-1k-baseline" #${tagname:-""}
 dataver=${dataver:-"none"}
+trainver="v1"
 tag=qw-vl7b-${trainver}-${tagname}
 rule_reward=${rule:-"none"}
 sys=${sys:-"default"}
@@ -165,11 +174,11 @@ aux=${aux:-"0.05"}
 evalsteps=${evalsteps:-"0"}
 save_name="${tag}-${bsz}-lossver${lossver}-samplever${dataver}-fmt${fmt}-${algo}-n${nsamples}-ml${maxlen}-lr${lr}-sys${sys}-${nnode}node" # rbsize 1024->256
 
-DATASET=/path/to/train.parquet
+DATASET="/home/s2412780/MLP-CW3/VL-Rethinker/data/subset_data_500/subset_500.parquet"
 MODEL_CPK_NAME=${save_name}
-PRETRAIN_MODEL=${policy}
-testdata="/path/to/test.parquet"
-SAVE_PATH=$working_dir/saves/$save_name
+PRETRAIN_MODEL="/home/s2412780/MLP-CW3/VL-Rethinker/Qwen2.5-VL-3B-Instruct"
+testdata="/home/s2412780/MLP-CW3/VL-Rethinker/data/subset_data_500/subset_500.parquet"
+SAVE_PATH=/home/s2412780/MLP-CW3/VL-Rethinker/saves/$save_name
 mkdir -p "${SAVE_PATH}"
 # pip install -U deepspeed==0.15.0 # https://github.com/OpenRLHF/OpenRLHF/issues/776#issuecomment-2694472824
 # 
@@ -191,17 +200,21 @@ if [ $nnode -gt 1 ]; then
         )
     
 else 
-    post_args=(--ref_num_nodes 0
-            --ref_num_gpus_per_node 8 
-            --actor_num_nodes 4
+    post_args=(
+            --ref_num_nodes 1
+            --ref_num_gpus_per_node 1 
+            --actor_num_nodes 1
             --actor_num_gpus_per_node 1 
-            --vllm_num_engines 4 
+            # --critic_num_nodes 1
+            # --critic_num_gpus_per_node 1
+            --vllm_num_engines 1 
             --vllm_tensor_parallel_size 1
-            --adam_offload
-            --micro_train_batch_size 4 
-            --train_batch_size ${bsz}
-            --micro_rollout_batch_size 4
-            --rollout_batch_size ${rbuffer}
+            --colocate_all_models           # <--- CRITICAL: Forces sharing of the 4 GPUs
+            --vllm_gpu_memory_utilization 0.4  # <--- Reduced from 0.85 to prevent Out-Of-Memory 
+            --micro_train_batch_size 1      # <--- Reduced from 4 to prevent Out-Of-Memory
+            --train_batch_size 16         # <--- Reduced from 64 to prevent Out-Of-Memory
+            --micro_rollout_batch_size 1    # <--- Reduced from 4 to prevent Out-Of-Memory
+            --rollout_batch_size 32
     )
 fi
 # :/usr/local/cuda/targets/x86_64-linux/lib
@@ -212,7 +225,7 @@ RUNTIME_ENV_JSON="{\"env_vars\": {\"LD_LIBRARY_PATH\": \"$LD_LIBRARY_PATH_VALUE\
 
 if [ "$NODE_RANK" = "0" ]; then
     # Start Ray head node and capture the output
-    ray_output=$(ray start --head --num-gpus 8)
+    ray_output=$(ray start --head --num-gpus 1)
 
     # Extract the IP address using grep and sed
     ip_address=$(echo "$ray_output" | grep -oP "ray start --address='\K[^']+")
@@ -238,7 +251,7 @@ if [ "$NODE_RANK" = "0" ]; then
     --runtime-env-json="$RUNTIME_ENV_JSON" \
     -- python3 -m openrlhf.cli.train_ppo_ray \
     --vllm_enable_sleep \
-    --vllm_gpu_memory_utilization 0.85 \
+    --vllm_gpu_memory_utilization 0.4 \
     --vllm_sync_backend gloo \
     --pretrain $PRETRAIN_MODEL \
     --save_path $SAVE_PATH \
@@ -247,8 +260,7 @@ if [ "$NODE_RANK" = "0" ]; then
     --num_episodes ${nepoch} \
     --filter ${filter} \
     --prompt_max_len 2048 \
-    --max_out_tokens ${maxtoken} \
-    --max_samples 100000 \
+    --max_samples 32 \
     --generate_max_len ${maxlen} \
     --advantage_estimator ${algo} \
     --zero_stage 3 \
@@ -276,14 +288,13 @@ if [ "$NODE_RANK" = "0" ]; then
     --save_hf_ckpt \
     --disable_ds_ckpt \
     --disable_fast_tokenizer \
-    --use_wandb $WANDB_API_KEY \
+    --use_wandb False \
     --wandb_run_name $save_name \
     --system_prompt ${sys} \
     --use_kl_estimator_k3 \
     --wandb_project vlm-rl \
     --buffer_norm 0 \
     --train_vlm \
-    --filter ${filter} \
     --eval_data ${testdata} \
     --data_version ${dataver} \
     --loss_version ${lossver} \
